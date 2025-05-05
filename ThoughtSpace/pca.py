@@ -1,14 +1,20 @@
 from typing import Tuple
 import numpy as np
 import pandas as pd
+
 from factor_analyzer import Rotator, calculate_bartlett_sphericity, calculate_kmo
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.decomposition import PCA
+
 from scipy.stats import pearsonr
+from scipy.linalg import eigh
+
 from sklearn.preprocessing import StandardScaler
+
 from ThoughtSpace.plotting import save_wordclouds, plot_scree,plot_stats
 from ThoughtSpace.utils import setupanalysis, returnhighest, clean_substrings
 import os
+
 from sklearn.model_selection import KFold, BaseCrossValidator
 
 class basePCA(TransformerMixin, BaseEstimator):
@@ -58,12 +64,15 @@ class basePCA(TransformerMixin, BaseEstimator):
             Save the results of the PCA analysis.
 
     """
-    def __init__(self, n_components="infer",verbosity=1,rotation="varimax"):
+    def __init__(self, n_components="infer",verbosity=1,rotation="varimax", method='svd'):
         self.n_components = n_components
         self.verbosity = verbosity
         self.rotation = rotation
+        self.method = method
         self.path = None
         self.ogdf = None
+
+
         
     def check_stats(self, df: pd.DataFrame) -> None:
         """
@@ -158,50 +167,129 @@ class basePCA(TransformerMixin, BaseEstimator):
             The z-score of the dataframe.
         """
         self.scaler = StandardScaler()
-        return self.scaler.fit_transform(df)
+        return pd.DataFrame(self.scaler.fit_transform(df))
 
-    def naive_pca(self, df: pd.DataFrame) -> Tuple[PCA, pd.DataFrame]:  # type: ignore
+    # def naive_pca(self, df: pd.DataFrame) -> Tuple[PCA, pd.DataFrame]:  # type: ignore
+    #     """
+    #     Perform Principal Component Analysis (PCA) on the input dataframe.
+
+    #     Args:
+    #         df (pd.DataFrame): The dataframe to be used for PCA.
+
+    #     Returns:
+    #         Tuple[PCA, pd.DataFrame]: A tuple containing the PCA object and the loadings dataframe.
+
+    #     Raises:
+    #         TypeError: If the rotation type is not supported.
+
+    #     """
+    #     if self.n_components == "infer":
+    #         self.fullpca = PCA(svd_solver="full").fit(df)
+    #         self.n_components = len([x for x in self.fullpca.explained_variance_ if x >= 1])
+    #         if self.verbosity > 0:
+    #             print(f"Inferred number of components: {self.n_components}")
+    #     else:
+    #         self.fullpca = PCA(svd_solver="full").fit(df)
+    #     pca = PCA(n_components=self.n_components,svd_solver="full").fit(df)
+        
+    #     if self.rotation == False:
+    #         loadings = pca.components_.T
+    #     elif self.rotation in ["varimax","promax","oblimin","oblimax","quartimin","quartimax","equamax"]:
+    #         loadings = Rotator(method=self.rotation).fit_transform(pca.components_.T)
+    #     else:
+    #         raise "Rotation type is not supported"
+        
+    #     loadings = pd.DataFrame(
+    #         loadings,
+    #         index=self.items,
+    #         columns=[f"PC{x+1}" for x in range(self.n_components)],
+    #     )
+    #     averages = loadings.mean(axis=0).to_dict()
+    #     for col in averages:
+    #         if averages[col] < 0:
+    #             if self.verbosity > 1:
+    #                 print(f"Component {col} has mostly negative loadings, flipping component")
+    #             loadings[col] = loadings[col] * -1
+    #     return loadings
+
+    def naive_pca(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Perform Principal Component Analysis (PCA) on the input dataframe.
+        Perform Principal Component Analysis (PCA) on the input NumPy array.
 
         Args:
-            df (pd.DataFrame): The dataframe to be used for PCA.
+            data (np.ndarray): The input data matrix (samples × variables).
 
         Returns:
-            Tuple[PCA, pd.DataFrame]: A tuple containing the PCA object and the loadings dataframe.
-
-        Raises:
-            TypeError: If the rotation type is not supported.
-
+            Tuple[np.ndarray, np.ndarray]: A tuple containing:
+                - The rotated (or unrotated) component loadings (variables × components).
+                - The explained variance of each component.
         """
-        if self.n_components == "infer":
+
+
+        if self.method == "svd":
+            # Fit PCA using sklearn (default approach)
             self.fullpca = PCA(svd_solver="full").fit(df)
-            self.n_components = len([x for x in self.fullpca.explained_variance_ if x >= 1])
-            if self.verbosity > 0:
-                print(f"Inferred number of components: {self.n_components}")
+            explained_variance = self.fullpca.explained_variance_
+
+            if self.n_components == "infer":
+                self.n_components = np.sum(explained_variance >= 1)
+                if self.verbosity > 0:
+                    print(f"Inferred number of components: {self.n_components}")
+
+            pca = PCA(n_components=self.n_components, svd_solver="full").fit(df)
+            loadings = pca.components_.T  # Unrotated component loadings
+            explained_variance = pca.explained_variance_
+
+        elif self.method == "eigen":
+
+            # Step 2: Compute the correlation matrix (R)
+            R = np.corrcoef(df, rowvar=False)
+
+            # Step 3: Perform eigen decomposition of the correlation matrix
+            self.fullpca, eigenvectors = eigh(R)  # ascending order
+            idx = np.argsort(self.fullpca)[::-1]  # Descending order
+
+            # Step 4: Select top n_components
+            self.eigenvalues, eigenvectors = self.fullpca[idx], eigenvectors[:, idx]
+            selected_eigenvectors = eigenvectors[:, :self.n_components]
+
+            # Step 5: Compute unrotated component loadings
+            loadings = selected_eigenvectors * np.sqrt(self.eigenvalues[:self.n_components])
+
+            # # Step 6: Apply Varimax rotation with Kaiser normalization
+            # rotator = Rotator(method=self.rotation, normalize=True)
+            # rotated_loadings = rotator.fit_transform(loadings)
+
         else:
-            self.fullpca = PCA(svd_solver="full").fit(df)
-        pca = PCA(n_components=self.n_components,svd_solver="full").fit(df)
-        
+            raise ValueError("Invalid method. Choose 'svd' or 'eigen'.")
+
         if self.rotation == False:
-            loadings = pca.components_.T
+            loadings = loadings
         elif self.rotation in ["varimax","promax","oblimin","oblimax","quartimin","quartimax","equamax"]:
-            loadings = Rotator(method=self.rotation).fit_transform(pca.components_.T)
+            loadings = Rotator(method=self.rotation, normalize=True).fit_transform(loadings)
         else:
             raise "Rotation type is not supported"
-        
+
+        for i in range(loadings.shape[1]):
+            if np.sum(loadings[:, i]) < 0:
+                loadings[:, i] *= -1 
+
         loadings = pd.DataFrame(
             loadings,
             index=self.items,
             columns=[f"PC{x+1}" for x in range(self.n_components)],
         )
-        averages = loadings.mean(axis=0).to_dict()
-        for col in averages:
-            if averages[col] < 0:
-                if self.verbosity > 1:
-                    print(f"Component {col} has mostly negative loadings, flipping component")
-                loadings[col] = loadings[col] * -1
+
+        # # Flip loadings if necessary
+        # averages = loadings.mean(axis=0).to_dict()
+        # for col in averages:
+        #     if averages[col] < 0:
+        #         if self.verbosity > 1:
+        #             print(f"Component {col} has mostly negative loadings, flipping component")
+        #         loadings[col] = loadings[col] * -1
+
         return loadings
+
 
     def fit(self, df, y=None, scale: bool = True, **kwargs) -> "PCA":
         """
@@ -229,6 +317,7 @@ class basePCA(TransformerMixin, BaseEstimator):
                 outcols.append(col)
             mapper = {cols[x]:outcols[x] for x in range(len(outcols))}
             _df = _df.rename(mapper,axis=1)
+
         except:
             pass
         if self.ogdf is None:
@@ -242,7 +331,7 @@ class basePCA(TransformerMixin, BaseEstimator):
        
         indivloadings = np.dot(_df,self.loadings).T
         for x in range(self.n_components):
-            self.extra_columns[f"PCA_{x}"] = indivloadings[x, :]
+            self.extra_columns[f"PCA_{x + 1}"] = indivloadings[x, :]
         self.extra_columns.index = dfidx
 
         if self.verbosity > 0:
@@ -256,17 +345,31 @@ class basePCA(TransformerMixin, BaseEstimator):
         Print explained variance for each principal component or cumulative variance.
         """
         if self.verbosity > 0:
-            if self.fullpca is not None:
-                explained_variance = self.fullpca.explained_variance_ratio_
-                cumulative_variance = self.fullpca.explained_variance_ratio_.cumsum()
 
-                print(f"The first {self.n_components} components explained {cumulative_variance[self.n_components-1]*100:.2f}% of cumulative variance.")
-                
-                if self.rotation:
-                    pass  
-                else:
-                    for i in range(self.n_components):
-                        print(f"Component {i+1} explained {explained_variance[i]*100:.2f}% of variance.")
+            if self.method == 'svd':
+                if self.fullpca is not None:
+                    explained_variance = self.fullpca.explained_variance_ratio_
+                    cumulative_variance = self.fullpca.explained_variance_ratio_.cumsum()
+
+                    print(f"The first {self.n_components} components explained {cumulative_variance[self.n_components-1]*100:.2f}% of cumulative variance.")
+                    
+                    if self.rotation:
+                        pass  
+                    else:
+                        for i in range(self.n_components):
+                            print(f"Component {i+1} explained {explained_variance[i]*100:.2f}% of variance.")
+
+            elif self.method == 'eigen':
+                # Compute % variance explained
+                # Compute % variance explained
+                explained_variance = self.eigenvalues[:self.n_components]
+                explained_variance = (explained_variance / np.sum(self.eigenvalues)) * 100
+                cumulative_variance = np.cumsum(explained_variance)
+
+                print(f"The first {self.n_components} components explained {cumulative_variance[self.n_components-1]:.2f}% of cumulative variance.")
+
+
+
             else:
                 print("PCA model not fitted. Please fit the model first.")
 
@@ -370,7 +473,9 @@ class basePCA(TransformerMixin, BaseEstimator):
         if self.path is None:
 
             self.path = setupanalysis(path,pathprefix,includetime)
+
         if group is None:
+
             os.makedirs(os.path.join(self.path,"wordclouds"),exist_ok=True)
             os.makedirs(os.path.join(self.path,"csvdata"),exist_ok=True)
             os.makedirs(os.path.join(self.path,"screeplots"),exist_ok=True)
@@ -400,7 +505,7 @@ class basePCA(TransformerMixin, BaseEstimator):
             plot_stats(self._raw_fitted,os.path.join(self.path, "descriptives", "fitted"))
             plot_stats(self._raw_project,os.path.join(self.path, "descriptives", "projected"))
             plot_stats(self._raw_full,os.path.join(self.path, "descriptives", "full"))
-            plot_scree(self.fullpca,os.path.join(self.path, "screeplots", "scree"))
+            plot_scree(self,os.path.join(self.path, "screeplots", "scree"))
         
         else:
             os.makedirs(os.path.join(self.path,f"wordclouds_{group}"),exist_ok=True)

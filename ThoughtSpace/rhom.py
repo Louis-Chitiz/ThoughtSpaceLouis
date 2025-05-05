@@ -255,10 +255,14 @@ class rhom(BaseEstimator):
             - The referent dataset for deriving components.
         - n_comp: int, default=None
             - The number of components to extract from the dataset.
-        - rotate: bool, default=True
-            - Whether to rotate the extracted components.
-        - method: str, default="Varimax"
-            - The rotation method to use for the loadings. If 'none', no rotation is performed. Supported methods are "varimax", "promax", "oblimin", "oblimax", "quartimin", "quartimax", and "equamax".
+        - method: str, default="svd"
+            - Method for PCA implementation.
+            - Can take:
+            1. 'svd' (sklearn PCA(svd_solver = "full"), numpy, scipy, MATLAB, R (prcomp), Stata)
+            2. 'eigen'(SPSS, R (psych, princomp), SAS, sklearn PCA(svd_solver="auto"))
+        - rotation: str, default="Varimax"
+            - The rotation method to use for the loadings. If None or False, no rotation is performed.
+            - Supported methods are "varimax", "promax", "oblimin", "oblimax", "quartimin", "quartimax", and "equamax".
         - bypc: bool, default=False
             - Whether to save component similarity on a by-component basis.
 
@@ -296,12 +300,13 @@ class rhom(BaseEstimator):
     Everett, J. E. (1983). Factor Comparability As A Means Of Determining The Number Of Factors And Their Rotation. \n\tMultivariate Behavioral Research, 18(2), 197-218. https://doi.org/10.1207/s15327906mbr1802_5
 
     """
-    def __init__(self, rd=None, n_comp=None, rotate=True, method="varimax", bypc=False):
+    def __init__(self, rd=None, n_comp=None, method='svd', rotation="varimax", bypc=False):
         self.rd = rd
         self.n_comp = n_comp
-        self.rotate = rotate
-        self.method = method
+        self.rotation = rotation
         self.bypc = bypc
+        self.method = method
+
     
     def get_params(self,deep=True):
         """
@@ -340,20 +345,18 @@ class rhom(BaseEstimator):
             None
         """
 
-        #If self.n_comp is greater than or equal to 2, a basePCA model is fitted to the 'x' data with the specified rotation method.
+        # If k >= 2, a basePCA model is fitted to the 'referent' data with the specified rotation method.
         if self.n_comp >= 2:
-            if self.method == "none":
-                self.model_x = basePCA(n_components=self.n_comp, verbosity = 0, rotation=False)
-            else:
-                self.model_x = basePCA(n_components=self.n_comp, verbosity = 0, rotation=self.method)
-        #If self.n_comp is less than 2, a basePCA model is fitted to the 'x' data with rotation method set to "none".
+                self.model_x = basePCA(n_components=self.n_comp, verbosity = 0, rotation=self.rotation, method=self.method)
+
+        # If k < 2, a basePCA model is fitted to the 'referent' data without rotation.
         else:
-            self.model_x = basePCA(n_components=self.n_comp, verbosity = 0, rotation=False)
+            self.model_x = basePCA(n_components=self.n_comp, verbosity = 0, rotation=False, method=self.method)
 
         self.model_x.fit(pd.DataFrame(x))
 
-        #Regardless of the value of self.n_comp, a basePCA model is always fitted to the 'y' data with rotation method set to "none".
-        self.model_x2 = basePCA(n_components=self.n_comp, verbosity = 0, rotation=False)
+        # Regardless of the value of k, a basePCA model is always fitted to the 'comparate' data without rotation.
+        self.model_x2 = basePCA(n_components=self.n_comp, verbosity = 0, rotation=False, method = self.method)
         self.model_x2.fit(pd.DataFrame(y))
 
     def predict(self, y=None):
@@ -372,8 +375,8 @@ class rhom(BaseEstimator):
         """
         y = self.rd
 
-        #If self.rotate is True, the prediction is performed by calculating the dot product of 'y' with the loadings of the fitted PCA models ('model_x' and 'model_x2') after applying orthogonal Procrustes rotation.
-        if self.rotate :
+        #If rotation is specified, the prediction is performed by calculating the dot product of the comparate set with the loadings of the fitted PCA models ('model_x' and 'model_x2') after applying orthogonal Procrustes rotation.
+        if self.rotation :
             results = []
 
             loadings = self.model_x.loadings.to_numpy()
@@ -385,7 +388,7 @@ class rhom(BaseEstimator):
                 self.results = np.dot(y, loads)
                 results.append(self.results)
 
-        #If self.rotate is False, the prediction is performed by transforming 'y' using the loadings of the fitted PCA models ('model_x' and 'model_x2').
+        #If no rotation, the prediction is performed by transforming the comparate set y using the loadings of the fitted PCA models ('model_x' and 'model_x2').
         else:
             results = []
             for model in [self.model_x,self.model_x2]:
@@ -419,7 +422,7 @@ class rhom(BaseEstimator):
         x2 = [[a,en] for en,a in enumerate(x2)]
         x2 = sorted(x2, key = lambda x: x[0])
 
-        #If the rows and columns with the highest correlations are different, it explores all possible permutations of the indices to find the best arrangement that maximizes the mean correlation value.
+        #If the rows and columns with the highest correlations are different, it explores all possible permutations of the indices to find the arrangement that maximizes the mean correlation value.
         if x != x2:
             idx = list(range(self.n_comp))
             sols = list(permutations(idx, r=self.n_comp))
@@ -937,7 +940,10 @@ def check_paths(parent_folder, prefix):
     if not os.path.exists(project_path):
         os.makedirs(project_path, exist_ok = True)
 
-def splithalf(df=None, group=None, npc=None, rotation='varimax', boot=1000, save=True, display=False, shuffle=False, path = 'results', file_prefix=randint(10000,99999)) :
+def splithalf(df=None, group=None, npc=None,
+              method = 'svd', rotation='varimax', boot=1000, 
+              save=True, display=False, shuffle=False, 
+              path = 'results', file_prefix=randint(10000,99999)) :
     '''
     Split-Half Reliability
     ----------------------
@@ -1000,10 +1006,11 @@ def splithalf(df=None, group=None, npc=None, rotation='varimax', boot=1000, save
         df_t = df
         samples = ['fulldata']
 
-    if rotation != rotation :
-        boot_model = rhom(rd = copy.deepcopy(df_t.values), n_comp = npc, rotate=False)
-    else :
-        boot_model = rhom(rd = copy.deepcopy(df_t.values), n_comp = npc, method=rotation)
+ 
+    boot_model = rhom(rd = copy.deepcopy(df_t.values),
+                      n_comp = npc,
+                      method = method,
+                      rotation=rotation)
         
     cv = pair_cv(group=group, n=boot)
 
@@ -1069,7 +1076,10 @@ def splithalf(df=None, group=None, npc=None, rotation='varimax', boot=1000, save
 
     return split_df  
 
-def dir_proj(df=None, group=None, npc=None, rotation="varimax", folds=5, save=True, plot=True, display=False, shuffle=False, path = 'results', file_prefix=randint(10000,99999)):    
+def dir_proj(df=None, group=None, npc=None,
+             method='svd', rotation="varimax", folds=5,
+             save=True, plot=True, display=False, shuffle=False, 
+             path = 'results', file_prefix=randint(10000,99999)):    
     '''
     Direct-Projection Reproducibility
     ---------------------------------
@@ -1165,7 +1175,11 @@ def dir_proj(df=None, group=None, npc=None, rotation="varimax", folds=5, save=Tr
         sd = np.std(data)
         return conf_int, mean, sd
 
-    boot_model = rhom(rd = copy.deepcopy(df.values), n_comp = npc, method=rotation)
+    boot_model = rhom(rd = copy.deepcopy(df.values),
+                      n_comp = npc, 
+                      method = method,
+                      rotation=rotation)
+    
     cv = pair_cv(boot=True, k=folds)
     for currentset in dagoodlist:
         print("Running " + str(currentset[0]) + " x " + str(currentset[1]))
@@ -1239,11 +1253,14 @@ def dir_proj(df=None, group=None, npc=None, rotation="varimax", folds=5, save=Tr
         plt.close()
 
     if save:
-        dirproj_df.to_csv(os.path.join(path, f"{file_prefix}/{file_prefix}_dj{len(df.columns)}D_{boot_model.n_comp}PC.csv", index = False))
+        dirproj_df.to_csv(os.path.join(path, f"{file_prefix}/{file_prefix}_dj{len(df.columns)}D_{boot_model.n_comp}PC.csv"), index = False)
 
     return dirproj_df
 
-def omni_sample(df=None, group=None, npc=None, rotation="varimax", boot=1000, save=True, display=False, shuffle=False, path = 'results', file_prefix=randint(10000,99999)):
+def omni_sample(df=None, group=None, npc=None,
+                method='svd', rotation="varimax", boot=1000,
+                save=True, display=False, shuffle=False,
+                path = 'results', file_prefix=randint(10000,99999)):
     '''
     Omnibus-Sample Reproducibility
     ------------------------------
@@ -1319,10 +1336,12 @@ def omni_sample(df=None, group=None, npc=None, rotation="varimax", boot=1000, sa
         sd = np.std(data)
         return conf_int, mean, sd
 
-    if rotation != rotation :
-        boot_model = rhom(rd = copy.deepcopy(df_t.values), n_comp = npc, rotate = False)
-    else :
-        boot_model = rhom(rd = copy.deepcopy(df_t.values), n_comp = npc, method=rotation)
+ 
+    boot_model = rhom(rd = copy.deepcopy(df_t.values),
+                      n_comp = npc,
+                      method = method,
+                      rotation=rotation)
+ 
         
     cv = pair_cv(omnibus = True, group=group, n=boot)
     totalRhm = []
@@ -1393,11 +1412,14 @@ def omni_sample(df=None, group=None, npc=None, rotation="varimax", boot=1000, sa
 
     if save:
 
-        omsamp_df.to_csv(os.path.join(path, f"{file_prefix}/{file_prefix}_omsamp_{len(df_t.columns)}D_{boot_model.n_comp}PC.csv", index = False))
+        omsamp_df.to_csv(os.path.join(path, f"{file_prefix}/{file_prefix}_omsamp_{len(df_t.columns)}D_{boot_model.n_comp}PC.csv"), index = False)
 
     return omsamp_df
 
-def bypc(df=None, group=None, npc=None, rotation="varimax", folds=5, save=True, plot=True, display=False, shuffle = False, path = 'results', file_prefix=randint(10000,99999)):
+def bypc(df=None, group=None, npc=None,
+         method='svd', rotation="varimax", folds=5,
+         save=True, plot=True, display=False, shuffle = False,
+         path = 'results', file_prefix=randint(10000,99999)):
     '''
     Omnibus-Sample Reproducibility: By-Component
     ------------------------------
@@ -1464,7 +1486,11 @@ def bypc(df=None, group=None, npc=None, rotation="varimax", folds=5, save=True, 
     '''
     df_t = df.drop(labels=group, axis=1)
     
-    boot_model = rhom(rd = copy.deepcopy(df_t.values), bypc=True, n_comp=npc, method=rotation)
+    boot_model = rhom(rd = copy.deepcopy(df_t.values),
+                      bypc=True, n_comp=npc,
+                      method = method,
+                      rotation = rotation)
+    
     cv = pair_cv(boot = True, group=group, k=folds)
 
     nrows = df[group].value_counts().reset_index()
